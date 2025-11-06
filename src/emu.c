@@ -1,15 +1,17 @@
 #include <assert.h>
 #include <inttypes.h>
-#include <math.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/types.h>
+#include <unistd.h>
 
+#include "disassmbler.h"
 #include "emu.h"
 
-void printByte(uint8_t x) {
+#define CPU_TEST
+
+static void printByte(uint8_t x) {
   int num_bits = 8;
   for (int i = num_bits - 1; i >= 0; i--) {
     if ((x >> i) & 1) {
@@ -20,7 +22,18 @@ void printByte(uint8_t x) {
   }
 }
 
-void unimplementedOpcodeError(uint8_t opcode) {
+static void printState(CPUState *state) {
+  printf("--Registers--\n");
+  printf("A: %d \nB : % d, C : % d \nD : % d, E : % d \nH : % d, L : % d\n",
+         state->a, state->b, state->c, state->d, state->e, state->h, state->l);
+  printf("--SP/PC--\n");
+  printf("PC: %04x\nSP: %04x\n", state->pc, state->sp);
+  printf("--Flags--\n");
+  printf("z: %d, s: %d, cy: %d, p: %d, ac: %d\n\n", state->cc.z, state->cc.s,
+         state->cc.cy, state->cc.p, state->cc.ac);
+}
+
+static void unimplementedOpcodeError(uint8_t opcode) {
   printf("ERROR UNIMPLEMENTED OPCODE: ");
   printByte(opcode);
   printf("\n");
@@ -44,7 +57,10 @@ static inline void setMReg(CPUState *state, uint8_t data) {
 static inline uint8_t parity(uint8_t x) {
   uint8_t n_one = 0;
   for (uint8_t i = 0; i < 8; i++) {
-    if (x >> i)
+    uint8_t shifted = x >> i;
+    if (shifted == 0)
+      break;
+    if (shifted & 1)
       n_one += 1;
   }
   return (n_one & 1) == 0;
@@ -150,15 +166,19 @@ static inline void i8080_daa(CPUState *state) {
   uint8_t nib1 = state->a & 0x0f;
   uint8_t nib2 = state->a >> 4;
 
-  if (nib1 > 9 || state->cc.ac)
+  if (nib1 > 9) {
     nib1 += 6;
+    nib2 += 1;
+  } else if (state->cc.ac) {
+    nib1 += 6;
+  }
 
   if (nib2 > 9 || state->cc.cy)
     nib2 += 6;
 
-  uint8_t val = nib1 + (nib2 << 4);
   state->cc.ac = (nib1 & 0xf0) != 0;
   state->cc.cy = (nib2 & 0xf0) != 0;
+  uint8_t val = (nib1 & 0x0f) + (nib2 << 4);
   state->cc.z = val == 0;
   state->cc.p = parity(val);
   state->cc.s = sign(val);
@@ -452,7 +472,6 @@ static inline void i8080_cpi(CPUState *state, uint8_t db) {
 static inline void i8080_rlc(CPUState *state) {
   uint16_t val = state->a << 1;
   uint8_t cy = val >> 8;
-  assert(cy == 1);
 
   // set first bit if wrap
   state->a = (0xff & val) | cy;
@@ -523,6 +542,32 @@ static inline void i8080_jmp_cond(CPUState *state, uint8_t opcode, uint8_t hb,
 }
 
 static inline void i8080_call(CPUState *state, uint8_t hb, uint8_t lb) {
+#ifdef CPU_TEST
+  uint16_t called_addr = get16Bit(hb, lb);
+  if (called_addr == 5) {
+    if (state->c == 9) {
+      uint16_t addr = get16Bit(state->d, state->e);
+      char *c = &state->memory[addr];
+      printf("\nPRINTING: ");
+      while (*c != '$') {
+        printf("%c", *c);
+        c += 1;
+      }
+      printf("\n");
+    } else if (state->c == 2) {
+      printf("Char output routine called");
+    }
+
+    getchar();
+    state->pc += 3;
+    return;
+  } else if (called_addr == 0) {
+    printf("Exiting");
+    exit(0);
+  }
+
+#endif
+
   uint16_t ret_addr = state->pc + 3;
   state->memory[state->sp - 1] = ret_addr >> 8;
   state->memory[state->sp - 2] = ret_addr & 0xff;
@@ -592,11 +637,11 @@ static inline void i8080_pop(CPUState *state, uint8_t *hr, uint8_t *lr) {
 
 static inline uint8_t make_psw_flag(const ConditionCodes *cc) {
   assert((cc->cy == 1) || (cc->cy == 0));
-  uint8_t flag = cc->cy & 2;
-  flag &= cc->p << 2;
-  flag &= cc->ac << 4;
-  flag &= cc->z << 6;
-  flag &= cc->s << 7;
+  uint8_t flag = cc->cy & 1;
+  flag |= cc->p << 2;
+  flag |= cc->ac << 4;
+  flag |= cc->z << 6;
+  flag |= cc->s << 7;
   return flag;
 }
 
@@ -608,12 +653,16 @@ static inline void i8080_push_psw(CPUState *state) {
   state->pc += 1;
 }
 
+
+// 106
+//
 static inline void i8080_pop_psw(CPUState *state) {
   uint8_t psw_flag = state->memory[state->sp];
   state->cc.cy = psw_flag & 1;
-  state->cc.p = psw_flag & 4;
-  state->cc.z = psw_flag & 6;
-  state->cc.s = psw_flag & 7;
+  state->cc.p = (psw_flag >> 2) & 1;
+  state->cc.ac = (psw_flag >> 4) & 1;
+  state->cc.z = (psw_flag >> 6) & 1;
+  state->cc.s = (psw_flag >> 7) & 1;
 
   state->a = state->memory[state->sp + 1];
   state->sp += 2;
@@ -647,16 +696,19 @@ static inline void i8080_sphl(CPUState *state) {
   state->pc += 1;
 }
 
-static inline void i8080_in(CPUState *state,uint8_t port){
-
+static inline void i8080_in(CPUState *state, uint8_t port) {
+  state->a = state->in_ports[port];
+  state->pc += 2;
 }
 
-static inline void i8080_out(CPUState *state, uint8_t port){
-
+static inline void i8080_out(CPUState *state, uint8_t port) {
+  state->out_ports[port] = state->a;
+  state->pc += 2;
 }
 
-static inline void i8080_halt(CPUState *state, uint8_t port){
-
+static inline void i8080_halt() {
+  printf("Halting 8080 Emulator");
+  exit(EXIT_SUCCESS);
 }
 
 void handleOpcode(CPUState *state, uint8_t *registers[]) {
@@ -765,27 +817,27 @@ void handleOpcode(CPUState *state, uint8_t *registers[]) {
     break;
   // SPHL
   case 0xf9:
-      i8080_sphl(state);
+    i8080_sphl(state);
     break;
   // EI
   case 0xfb:
-      i8080_ei(state);
+    i8080_ei(state);
     break;
   // DI
   case 0xf3:
-      i8080_di(state);
+    i8080_di(state);
     break;
   // HLT
   case 0x76:
-    printf("HLT");
+    i8080_halt();
     break;
   // IN
   case 0xdb:
-    printf("IN");
+    i8080_in(state, code[1]);
     break;
   // OUT
   case 0xd3:
-    printf("OUT");
+    i8080_out(state, code[1]);
     break;
   // CPI
   case 0xfe:
@@ -835,6 +887,7 @@ void handleOpcode(CPUState *state, uint8_t *registers[]) {
   // LDAX
   case 0x0a:
     i8080_ldax(state, state->b, state->c);
+    break;
   case 0x1a:
     i8080_ldax(state, state->d, state->e);
     break;
@@ -940,9 +993,8 @@ void handleOpcode(CPUState *state, uint8_t *registers[]) {
     i8080_dad(state, state->b, state->c);
     break;
   case 0x19:
-    i8080_dad(state, state->b, state->c);
+    i8080_dad(state, state->d, state->e);
     break;
-
   case 0x29:
     i8080_dad(state, state->h, state->l);
     break;
@@ -953,6 +1005,7 @@ void handleOpcode(CPUState *state, uint8_t *registers[]) {
 
   // JMP conditional
   case 0xc2: // JNZ
+
   case 0xca: // JZ
   case 0xd2: // JNC
   case 0xda: // JC
@@ -1045,46 +1098,63 @@ void handleOpcode(CPUState *state, uint8_t *registers[]) {
   case 0xdd:
   case 0xed:
   case 0xfd:
-    // printf("NOP");
+    state->pc += 1;
     break;
 
   default:
     unimplementedOpcodeError(code[0]);
     break;
   }
+
+  printState(state);
 }
 
-int main(int argc, char *argv[]) {
-  FILE *f = fopen(argv[1], "rb");
+void readFileIntoMemory(char *fpath, CPUState *state, uint32_t offset) {
+
+  FILE *f = fopen(fpath, "rb");
 
   if (f == NULL) {
-    printf("error: Couldn't open file %s\n", argv[1]);
+    printf("error: Couldn't open file %s\n", fpath);
     exit(1);
   }
-
-  CPUState cpu_state;
-  cpu_state.memory = (uint8_t *)malloc(MEMORY_SIZE);
-  cpu_state.pc = PROGRAM_START;
-
-  uint8_t *registers[8];
-  registers[0] = &cpu_state.b;
-  registers[1] = &cpu_state.c;
-  registers[2] = &cpu_state.d;
-  registers[3] = &cpu_state.e;
-  registers[4] = &cpu_state.h;
-  registers[5] = &cpu_state.l;
-  registers[6] = NULL; // mem reg
-  registers[7] = &cpu_state.a;
 
   fseek(f, 0, SEEK_END);
   int fsize = ftell(f);
   fseek(f, 0, SEEK_SET);
 
-  fread(cpu_state.memory, fsize, 1, f);
+  fread(&state->memory[offset], fsize, 1, f);
   fclose(f);
+}
 
-  while (cpu_state.pc < fsize) {
-    handleOpcode(&cpu_state, registers);
+int main(int argc, char *argv[]) {
+  CPUState *state = calloc(sizeof(CPUState), 1);
+  state->memory = (uint8_t *)malloc(MEMORY_SIZE);
+  state->pc = 0x000;
+  state->sp = 0x000;
+
+  uint8_t *registers[8];
+  registers[0] = &state->b;
+  registers[1] = &state->c;
+  registers[2] = &state->d;
+  registers[3] = &state->e;
+  registers[4] = &state->h;
+  registers[5] = &state->l;
+  registers[6] = NULL; // mem reg
+  registers[7] = &state->a;
+
+  readFileIntoMemory(argv[1], state, 0x100);
+
+#ifdef CPU_TEST
+  state->pc = 0x100;
+#endif
+
+  while (1) {
+    printf("%04x: ", state->pc);
+    printOpcode(&state->memory[state->pc]);
+    printf("\n");
+    handleOpcode(state, registers);
+    // getchar();
   }
+
   return 0;
 }

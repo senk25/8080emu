@@ -1,17 +1,16 @@
+#include "disassmbler.h"
 #include <stdio.h>
-#include <stdlib.h>
 
-void printTwoArgs(char *s, unsigned char *code) {
-  printf("%s, %02x%02x", s, code[2], code[1]);
+static void printTwoArgs(char *s, unsigned char *code) {
+  printf("%s, 0x%02x%02x", s, code[2], code[1]);
 }
 
-void printOneArg(char *s, unsigned char *code) {
-  printf("%s, %02x", s, code[1]);
+static void printOneArg(char *s, unsigned char *code) {
+  printf("%s, 0x%02x", s, code[1]);
 }
 
-int handleOpcode(unsigned char *codebuffer, int pc) {
-  unsigned char *code = &codebuffer[pc];
-  int opbytes = 1; // size of opcode
+int printOpcode(uint8_t *code) {
+  uint8_t opbytes = 1;
   switch (code[0]) {
   case 0x00:
     printf("NOP");
@@ -840,30 +839,37 @@ int handleOpcode(unsigned char *codebuffer, int pc) {
     printf("RST 7");
     break;
   }
+
+  return opbytes;
+}
+
+int iterateOpcodes(unsigned char *codebuffer, int pc) {
+  unsigned char *code = &codebuffer[pc];
+  uint8_t opbytes = printOpcode(code);
   printf("\n");
   return opbytes;
 }
 
-int main(int argc, char *argv[]) {
-  FILE *f = fopen(argv[1], "rb");
-
-  if (f == NULL) {
-    printf("error: Couldn't open file %s\n", argv[1]);
-    exit(1);
-  }
-
-  fseek(f, 0, SEEK_END);
-  int fsize = ftell(f);
-  fseek(f, 0, SEEK_SET);
-
-  unsigned char *buffer = malloc(fsize);
-  fread(buffer, fsize, 1, f);
-  fclose(f);
-
-  int pc = 0;
-
-  while (pc < fsize) {
-    pc += handleOpcode(buffer, pc);
-  }
-  return 0;
-}
+// int main(int argc, char *argv[]) {
+//   FILE *f = fopen(argv[1], "rb");
+//
+//   if (f == NULL) {
+//     printf("error: Couldn't open file %s\n", argv[1]);
+//     exit(1);
+//   }
+//
+//   fseek(f, 0, SEEK_END);
+//   int fsize = ftell(f);
+//   fseek(f, 0, SEEK_SET);
+//
+//   unsigned char *buffer = malloc(fsize);
+//   fread(buffer, fsize, 1, f);
+//   fclose(f);
+//
+//   int pc = 0;
+//
+//   while (pc < fsize) {
+//     pc += handleOpcode(buffer, pc);
+//   }
+//   return 0;
+// }
